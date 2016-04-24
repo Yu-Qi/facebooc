@@ -5,10 +5,13 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/select.h>
+#include <sys/epoll.h>
+#include <sys/timerfd.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #include "bs.h"
 #include "server.h"
@@ -153,8 +156,10 @@ static inline int makeSocket(unsigned int port)
         fprintf(stderr, "error: failed to bind socket to 0.0.0.0:%d\n", port);
         exit(1);
     }
+    //if (make_socket_non_blocking (sock) == -1)
+     //   exit(1);
 
-    if (listen(sock, 1) < 0) {
+    if (listen(sock, SOMAXCONN) < 0) {
         fprintf(stderr, "error: socket failed to listen\n");
         exit(1);
     }
@@ -162,7 +167,7 @@ static inline int makeSocket(unsigned int port)
     return sock;
 }
 
-static inline void handle(Server *server, int fd, fd_set *activeFDs, struct sockaddr_in *addr)
+static inline void handle(Server *server, int fd, int epfd, struct sockaddr_in *addr)
 {
     int  nread;
     char buff[20480];
@@ -171,7 +176,6 @@ static inline void handle(Server *server, int fd, fd_set *activeFDs, struct sock
         fprintf(stderr, "error: read failed\n");
     } else if (nread > 0) {
         buff[nread] = '\0';
-
         Request *req = requestNew(buff);
 
         if (!req) {
@@ -200,10 +204,9 @@ static inline void handle(Server *server, int fd, fd_set *activeFDs, struct sock
             requestDel(req);
         }
     }
-
+    set_fd_polling(epfd, fd, EPOLL_CTL_DEL, 0) ; 
     close(fd);
-
-    FD_CLR(fd, activeFDs);
+    pthread_exit(NULL);
 }
 
 void serverServe(Server *server)
@@ -213,40 +216,103 @@ void serverServe(Server *server)
 
     socklen_t size;
 
-    fd_set activeFDs;
-    fd_set readFDs;
+    int epfd = epoll_create1(0);
 
     struct sockaddr_in addr;
 
-    FD_ZERO(&activeFDs);
-    FD_SET(sock, &activeFDs);
+    set_fd_polling(epfd, sock,
+                          EPOLL_CTL_ADD, 0);
+
 
     fprintf(stdout, "Listening on port %d.\n\n", server->port);
 
+    struct epoll_event chevent;
+    struct epoll_event *events;
+
+    chevent.data.fd = sock;
+  
+    chevent.events = EPOLLOUT | EPOLLIN |
+                     EPOLLET | EPOLLERR |
+                     EPOLLRDHUP | EPOLLHUP;
+                
+    events = calloc (MAX_EVENTS, sizeof chevent);
+
     for (;;) {
-        readFDs = activeFDs;
+        int active_count = epoll_wait(epfd, events, MAX_EVENTS, 0) ;
+        if (active_count < 0 ){
+             fprintf(stderr, "error: failed to epoll\n");
+            exit(1);           
+        } 
+        else{
+            for (int i = 0; i < active_count; i++){
 
-        if (select(FD_SETSIZE, &readFDs, NULL, NULL, NULL) < 0) {
-            fprintf(stderr, "error: failed to select\n");
-            exit(1);
-        }
-
-        for (int fd = 0; fd < FD_SETSIZE; ++fd) {
-            if (FD_ISSET(fd, &readFDs)) {
-                if (fd == sock) {
+                if( events[i].events &  (~(EPOLLIN | EPOLLOUT) ) ){
+                    set_fd_polling(epfd, events[i].data.fd, EPOLL_CTL_DEL, 0) ;    
+                    close( events[i].data.fd);
+                    continue;
+                }
+                else if( sock == events[i].data.fd){
                     size    = sizeof(addr);
                     newSock = accept(sock, (struct sockaddr *) &addr, &size);
-
-                    if (newSock < 0) {
-                        fprintf(stderr, "error: failed to accept connection\n");
-                        exit(1);
+                    if(newSock == -1){
+                        if ((errno == EAGAIN) ||
+                          (errno == EWOULDBLOCK))
+                            break;
                     }
-
-                    FD_SET(newSock, &activeFDs);
-                } else {
-                    handle(server, fd, &activeFDs, &addr);
+                    //make_socket_non_blocking(newSock);
+                    set_fd_polling(epfd, newSock, EPOLL_CTL_ADD, 0);
                 }
+                
+                else{ 
+                    if(events[i].events & EPOLLOUT ){
+                        handle(server, events[i].data.fd, epfd, &addr);
+                    }
+                }
+
             }
         }
+
     }
+
+}
+
+// todo
+int set_fd_polling(int queue, int fd, int action, long milliseconds)
+{
+    struct epoll_event chevent;
+    chevent.data.fd = fd;
+    chevent.events = EPOLLOUT | EPOLLIN |
+                     EPOLLET | EPOLLERR |
+                     EPOLLRDHUP | EPOLLHUP;
+    /*
+    if (milliseconds) {
+        struct itimerspec newtime;
+        newtime.it_value.tv_sec = newtime.it_interval.tv_sec =
+                                  milliseconds / 1000;
+        newtime.it_value.tv_nsec = newtime.it_interval.tv_nsec =
+                                  (milliseconds % 1000) * 1000000;
+        timerfd_settime(fd, 0, &newtime, NULL);
+    }*/
+    return epoll_ctl(queue, action, fd, &chevent);
+}
+int make_socket_non_blocking (int sfd)
+{
+  int flags, s;
+
+  flags = fcntl (sfd, F_GETFL, 0);
+  if (flags == -1)
+    {
+      perror ("fcntl");
+      return -1;
+    }
+
+  flags |= O_NONBLOCK;
+  s = fcntl (sfd, F_SETFL, flags);
+  if (s == -1)
+    {
+      perror ("fcntl");
+      return -1;
+    }
+
+  return 0;
 }

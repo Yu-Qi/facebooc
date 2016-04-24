@@ -1,5 +1,5 @@
-CFLAGS = -O2 -g -std=c99 -Wall -D_POSIX_SOURCE -I include
-LDFLAGS = -lsqlite3
+CFLAGS = -O2 -g -std=c99 -Wall -D_POSIX_SOURCE -I include -lpthread
+LDFLAGS = -lsqlite3 -lpthread
 
 OUT = bin
 EXEC = $(OUT)/facebooc
