@@ -206,7 +206,6 @@ static inline void handle(Server *server, int fd, int epfd, struct sockaddr_in *
     }
     set_fd_polling(epfd, fd, EPOLL_CTL_DEL, 0) ; 
     close(fd);
-    pthread_exit(NULL);
 }
 
 void serverServe(Server *server)
@@ -251,7 +250,7 @@ void serverServe(Server *server)
                     close( events[i].data.fd);
                     continue;
                 }
-                else if( sock == events[i].data.fd){
+                if( sock == events[i].data.fd){
                     size    = sizeof(addr);
                     newSock = accept(sock, (struct sockaddr *) &addr, &size);
                     if(newSock == -1){
